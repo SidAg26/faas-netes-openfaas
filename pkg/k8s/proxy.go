@@ -56,6 +56,12 @@ func getNamespace(name, defaultNamespace string) string {
 	return namespace
 }
 
+// This method resolves a function name to a URL.
+// It extracts the function name and namespace from the provided name,
+// verifies the namespace, and retrieves the corresponding service endpoints.
+// If the service has no subsets or addresses, it returns an error.
+// If successful, it randomly selects an address from the service's endpoints
+// and constructs a URL pointing to the function's watchdog port (8080).
 func (l *FunctionLookup) Resolve(name string) (url.URL, error) {
 	functionName := name
 	namespace := getNamespace(name, l.DefaultNamespace)
