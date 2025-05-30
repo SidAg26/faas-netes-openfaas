@@ -90,6 +90,13 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, error) {
 		return url.URL{}, fmt.Errorf("no subsets available for \"%s.%s\"", functionName, namespace)
 	}
 
+	// This is where the faas-netes controller
+	// creates the service with a single subset i.e.
+	// it looks for the available pods from the service/deployment
+	// and forwards the request to one of them.
+	// However, if there are no pods available, the faas-provider 
+	// interface handles the creation/scaling of the functions
+	// when the request arrives.
 	all := len(svc.Subsets[0].Addresses)
 	if len(svc.Subsets[0].Addresses) == 0 {
 		return url.URL{}, fmt.Errorf("no addresses in subset for \"%s.%s\"", functionName, namespace)
