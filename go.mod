@@ -1,6 +1,7 @@
 module github.com/openfaas/faas-netes
 
-go 1.23.0
+// SA - Fix the Go version to 1.23 to avoid issues with newer versions
+go 1.18
 
 require (
 	github.com/google/go-cmp v0.7.0 // indirect
@@ -13,6 +14,9 @@ require (
 	k8s.io/klog v1.0.0
 	sigs.k8s.io/structured-merge-diff/v4 v4.7.0
 )
+
+// SA - redirect faas-provider to local directory for development
+replace github.com/openfaas/faas-provider => /home/ubuntu/memFigLessDIR/faas-provider-openfaas
 
 require (
 	github.com/google/go-containerregistry v0.20.3

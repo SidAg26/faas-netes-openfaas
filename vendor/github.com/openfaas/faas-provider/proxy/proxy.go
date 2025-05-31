@@ -158,6 +158,10 @@ func proxyRequest(w http.ResponseWriter, originalReq *http.Request, proxyClient 
 		return
 	}
 
+	// SA - URL in the format of fmt.Sprintf("http://%s:%d", serviceIP, watchdogPort)
+	// where serviceIP is the IP address of the function service and watchdogPort is the port
+	// that the function's watchdog is listening on.
+	// The function name is used to resolve the service address.
 	functionAddr, err := resolver.Resolve(functionName)
 	if err != nil {
 		w.Header().Add(openFaaSInternalHeader, "proxy")
@@ -216,6 +220,10 @@ func proxyRequest(w http.ResponseWriter, originalReq *http.Request, proxyClient 
 	copyHeaders(clientHeader, &response.Header)
 	w.Header().Set("Content-Type", getContentType(originalReq.Header, response.Header))
 
+	// SA - Set the response header to include the pod/service IP
+	// This will be sent to the client/gateway
+	w.Header().Set("X-OpenFaaS-Backend-IP", functionAddr.Hostname())
+
 	w.WriteHeader(response.StatusCode)
 	if response.Body != nil {
 		io.Copy(w, response.Body)
@@ -243,6 +251,10 @@ func buildProxyRequest(originalReq *http.Request, baseURL url.URL, extraPath str
 		return nil, err
 	}
 	copyHeaders(upstreamReq.Header, &originalReq.Header)
+
+	// SA - Set the proxyRequest header to include the pod/service IP
+	// This will not be relayed back to the client/gateway
+	// upstreamReq.Header.Set("X-OpenFaaS-Backend-IP", baseURL.Hostname())
 
 	if len(originalReq.Host) > 0 && upstreamReq.Header.Get("X-Forwarded-Host") == "" {
 		upstreamReq.Header["X-Forwarded-Host"] = []string{originalReq.Host}
