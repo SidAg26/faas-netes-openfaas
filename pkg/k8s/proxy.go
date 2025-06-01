@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	// SA - Add the logging package
+	"log"
 
 	corelister "k8s.io/client-go/listers/core/v1"
 )
@@ -25,6 +27,8 @@ func NewFunctionLookup(ns string, lister corelister.EndpointsLister) *FunctionLo
 		EndpointLister:   lister,
 		Listers:          map[string]corelister.EndpointsNamespaceLister{},
 		lock:             sync.RWMutex{},
+		// SA - Add the Round-Robin module
+		rrSelector: NewRoundRobinSelector(), // Initialize the Round-Robin selector
 	}
 }
 
@@ -35,10 +39,13 @@ type FunctionLookup struct {
 
 	lock sync.RWMutex
 
-	// SA - Add the Round-Robin strategy last index tracker
-	// for each function-namespace combination.
-	rrLock sync.RWMutex // lock for rrLastSelected
-	rrLastSelected map[string]int // key: functionName.namespace, value: last index
+	// SA - Add the Round-Robin module
+	rrSelector *RoundRobinSelector // Round-Robin selector for function endpoints
+
+	// // SA - Add the Round-Robin strategy last index tracker
+	// // for each function-namespace combination.
+	// rrLock sync.RWMutex // lock for rrLastSelected
+	// rrLastSelected map[string]int // key: functionName.namespace, value: last index
 }
 
 func (f *FunctionLookup) GetLister(ns string) corelister.EndpointsNamespaceLister {
@@ -108,35 +115,40 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, error) {
 	}
 
 	target := rand.Intn(all)
-	// SA - ToDo: 
-	// Instead of randomly selecting an address,
-	// what other strategies could be used?
-	// 1. Round-robin selection
-	// 2. Least connections
-	// 3. Weighted distribution based on previous response times
-
-	// SA - 1. Round-robin selection
+	// SA - ToDo: 1. Round-Robin selection
 	key := functionName + "." + namespace
-	l.rrLock.Lock()
-	if l.rrLastSelected == nil {
-		l.rrLastSelected = make(map[string]int) // Initialize the map if it doesn't exist
-	}
-	last := l.rrLastSelected[key]
+	target = l.rrSelector.Next(key, all)
+	log.Printf("Selected target index %d for function %s in namespace %s", target, functionName, namespace)
 
-	// SA - ensure the last index is within the range of available addresses
-	if last >= all  || last < 0 {
-		// If last is out of bounds, reset it to 0
-		// This can happen if the service was updated or restarted
-		// and the last selected index is no longer valid.
-		// This ensures that we always start from the first address
-		last = 0
-		l.rrLastSelected[key] = last
-	}
+	// // SA - ToDo: 
+	// // Instead of randomly selecting an address,
+	// // what other strategies could be used?
+	// // 1. Round-robin selection
+	// // 2. Least connections
+	// // 3. Weighted distribution based on previous response times
 
-	next := (last + 1) % all
-	l.rrLastSelected[key] = next
-	l.rrLock.Unlock()
-	target = next
+	// // SA - 1. Round-robin selection
+	// key := functionName + "." + namespace
+	// l.rrLock.Lock()
+	// if l.rrLastSelected == nil {
+	// 	l.rrLastSelected = make(map[string]int) // Initialize the map if it doesn't exist
+	// }
+	// last := l.rrLastSelected[key]
+
+	// // SA - ensure the last index is within the range of available addresses
+	// if last >= all  || last < 0 {
+	// 	// If last is out of bounds, reset it to 0
+	// 	// This can happen if the service was updated or restarted
+	// 	// and the last selected index is no longer valid.
+	// 	// This ensures that we always start from the first address
+	// 	last = 0
+	// 	l.rrLastSelected[key] = last
+	// }
+
+	// next := (last + 1) % all
+	// l.rrLastSelected[key] = next
+	// l.rrLock.Unlock()
+	// target = next
 	// -------------------------------
 
 	serviceIP := svc.Subsets[0].Addresses[target].IP
