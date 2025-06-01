@@ -34,6 +34,11 @@ type FunctionLookup struct {
 	Listers          map[string]corelister.EndpointsNamespaceLister
 
 	lock sync.RWMutex
+
+	// SA - Add the Round-Robin strategy last index tracker
+	// for each function-namespace combination.
+	rrLock sync.RWMutex // lock for rrLastSelected
+	rrLastSelected map[string]int // key: functionName.namespace, value: last index
 }
 
 func (f *FunctionLookup) GetLister(ns string) corelister.EndpointsNamespaceLister {
@@ -103,6 +108,36 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, error) {
 	}
 
 	target := rand.Intn(all)
+	// SA - ToDo: 
+	// Instead of randomly selecting an address,
+	// what other strategies could be used?
+	// 1. Round-robin selection
+	// 2. Least connections
+	// 3. Weighted distribution based on previous response times
+
+	// SA - 1. Round-robin selection
+	key := functionName + "." + namespace
+	l.rrLock.Lock()
+	if l.rrLastSelected == nil {
+		l.rrLastSelected = make(map[string]int) // Initialize the map if it doesn't exist
+	}
+	last := l.rrLastSelected[key]
+
+	// SA - ensure the last index is within the range of available addresses
+	if last >= all  || last < 0 {
+		// If last is out of bounds, reset it to 0
+		// This can happen if the service was updated or restarted
+		// and the last selected index is no longer valid.
+		// This ensures that we always start from the first address
+		last = 0
+		l.rrLastSelected[key] = last
+	}
+
+	next := (last + 1) % all
+	l.rrLastSelected[key] = next
+	l.rrLock.Unlock()
+	target = next
+	// -------------------------------
 
 	serviceIP := svc.Subsets[0].Addresses[target].IP
 
