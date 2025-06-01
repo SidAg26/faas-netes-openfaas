@@ -223,6 +223,8 @@ func runController(setup serverSetup) {
 		Secrets:        handlers.MakeSecretHandler(config.DefaultFunctionNamespace, kubeClient),
 		Logs:           logs.NewLogHandlerFunc(k8s.NewLogRequestor(kubeClient, config.DefaultFunctionNamespace), config.FaaSConfig.WriteTimeout),
 		ListNamespaces: handlers.MakeNamespacesLister(config.DefaultFunctionNamespace, kubeClient),
+		// SA - add the handler for function pod IP listing
+		// ListFunctionPodIPs: handlers.MakePodListHandler(kubeClient),
 	}
 
 	ctx := context.Background()

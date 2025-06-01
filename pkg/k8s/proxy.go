@@ -29,6 +29,8 @@ func NewFunctionLookup(ns string, lister corelister.EndpointsLister) *FunctionLo
 		lock:             sync.RWMutex{},
 		// SA - Add the Round-Robin module
 		rrSelector: NewRoundRobinSelector(), // Initialize the Round-Robin selector
+		// SA - Add the PodStatusCache
+		podStatusCache: NewPodStatusCache(), // Initialize the PodStatusCache
 	}
 }
 
@@ -41,6 +43,8 @@ type FunctionLookup struct {
 
 	// SA - Add the Round-Robin module
 	rrSelector *RoundRobinSelector // Round-Robin selector for function endpoints
+	// SA - Add the PodStatusCache
+	podStatusCache *PodStatusCache // Cache for pod statuses
 
 	// // SA - Add the Round-Robin strategy last index tracker
 	// // for each function-namespace combination.
@@ -152,12 +156,33 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, error) {
 	// -------------------------------
 
 	serviceIP := svc.Subsets[0].Addresses[target].IP
+	
+	podName := ""
+	//SA - ToDo: Update the Pod StatusCache with the selected pod and its IP
+	if targetRef := svc.Subsets[0].Addresses[target].TargetRef; targetRef != nil {
+		podName = targetRef.Name
+		l.podStatusCache.Set(podName, "busy", serviceIP, functionName, namespace)
+		log.Printf("Updated PodStatusCache for pod %s in function %s with IP %s as %s", podName, functionName, serviceIP, "BUSY")
+	} else {
+		log.Printf("No TargetRef found for address %s in function %s", serviceIP, functionName)
+	}
+	// ---------------------------------
 
 	urlStr := fmt.Sprintf("http://%s:%d", serviceIP, watchdogPort)
 
 	urlRes, err := url.Parse(urlStr)
 	if err != nil {
 		return url.URL{}, err
+	}
+
+	// SA - Add the function name and namespace to the URL query parameters
+	if podName !="" {
+		q := urlRes.Query()
+		q.Set("podName", podName)
+		q.Set("podIP", serviceIP)
+		q.Set("podNamespace", namespace)
+		urlRes.RawQuery = q.Encode()
+		log.Printf("Resolved URL for function %s in namespace %s: %s with pod %s and IP %s", functionName, namespace, urlRes.String(), podName, serviceIP)
 	}
 
 	return *urlRes, nil
@@ -169,4 +194,16 @@ func (l *FunctionLookup) verifyNamespace(name string) error {
 	}
 	// ToDo use global namepace parse and validation
 	return fmt.Errorf("namespace not allowed")
+}
+
+// SA - Add a method to get all pods for a specific function
+// GetFunctionPodStatuses returns all pod statuses for a specific function in a namespace.
+func (l *FunctionLookup) GetFunctionPodStatuses(function, namespace string) []PodStatus {
+	return l.podStatusCache.GetByFunction(function, namespace)
+}
+
+// SA - Add a method to get all pod statuses
+// GetAllPodStatuses returns all pod statuses from the cache.
+func (l *FunctionLookup) GetAllPodStatuses() map[string]PodStatus {
+	return l.podStatusCache.GetAll()
 }
