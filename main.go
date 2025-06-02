@@ -197,6 +197,9 @@ func runController(setup serverSetup) {
 	functionLookup := k8s.NewFunctionLookup(config.DefaultFunctionNamespace, listers.EndpointsInformer.Lister())
 	functionList := k8s.NewFunctionList(config.DefaultFunctionNamespace, deployLister)
 
+	// SA - Register the function pod IP handler
+	faasProvider.Router().HandleFunc("/system/podstatus/{status}", handlers.MakePodIdleHandler(functionLookup)).Methods(http.MethodPost)
+
 	printFunctionExecutionTime := true
 
 	proxyHandler := proxy.NewHandlerFunc(config.FaaSConfig, functionLookup, printFunctionExecutionTime)

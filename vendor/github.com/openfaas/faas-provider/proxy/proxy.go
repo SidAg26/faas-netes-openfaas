@@ -172,6 +172,12 @@ func proxyRequest(w http.ResponseWriter, originalReq *http.Request, proxyClient 
 		return
 	}
 
+	// SA - Extract the path variables from the request
+	// as the fmt is http://10.1.45.221:8080?podIP=10.1.45.221&podName=nodeinfo-7b987c6bc4-bpj9h&podNamespace=openfaas-fn
+	podIP := functionAddr.Query().Get("podIP")
+	podName := functionAddr.Query().Get("podName")
+	podNamespace := functionAddr.Query().Get("podNamespace")
+
 	proxyReq, err := buildProxyRequest(originalReq, functionAddr, pathVars["params"])
 	if err != nil {
 
@@ -223,6 +229,10 @@ func proxyRequest(w http.ResponseWriter, originalReq *http.Request, proxyClient 
 	// SA - Set the response header to include the pod/service IP
 	// This will be sent to the client/gateway
 	w.Header().Set("X-OpenFaaS-Backend-IP", functionAddr.Hostname())
+	// SA - Set the pod IP, pod name and pod namespace in the response header
+	w.Header().Set("X-OpenFaaS-Pod-IP", podIP)
+	w.Header().Set("X-OpenFaaS-Pod-Name", podName)
+	w.Header().Set("X-OpenFaaS-Pod-Namespace", podNamespace)
 
 	w.WriteHeader(response.StatusCode)
 	if response.Body != nil {
