@@ -197,6 +197,8 @@ func runController(setup serverSetup) {
 	functionLookup := k8s.NewFunctionLookup(config.DefaultFunctionNamespace, listers.EndpointsInformer.Lister())
 	functionList := k8s.NewFunctionList(config.DefaultFunctionNamespace, deployLister)
 
+	// SA - set the idle-first selector clientset
+	functionLookup.SetIdleFirstSelectorClientset(kubeClient)
 	// SA - Register the function pod IP handler
 	faasProvider.Router().HandleFunc("/system/podstatus/{status}", handlers.MakePodIdleHandler(functionLookup)).Methods(http.MethodPost)
 

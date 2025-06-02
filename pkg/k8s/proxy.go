@@ -12,17 +12,21 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+
 	// SA - Add the logging package
 	"log"
 
 	corelister "k8s.io/client-go/listers/core/v1"
+	// SA - Add the kuberentes package
+	"k8s.io/client-go/kubernetes"
 )
 
 // watchdogPort for the OpenFaaS function watchdog
 const watchdogPort = 8080
 
 func NewFunctionLookup(ns string, lister corelister.EndpointsLister) *FunctionLookup {
-	return &FunctionLookup{
+	cache := NewPodStatusCache() // SA - Initialize the shared PodStatusCache
+	lookup := &FunctionLookup{
 		DefaultNamespace: ns,
 		EndpointLister:   lister,
 		Listers:          map[string]corelister.EndpointsNamespaceLister{},
@@ -30,8 +34,11 @@ func NewFunctionLookup(ns string, lister corelister.EndpointsLister) *FunctionLo
 		// SA - Add the Round-Robin module
 		rrSelector: NewRoundRobinSelector(), // Initialize the Round-Robin selector
 		// SA - Add the PodStatusCache
-		podStatusCache: NewPodStatusCache(), // Initialize the PodStatusCache
+		podStatusCache: cache, // Initialize the PodStatusCache
+
 	}
+	lookup.idleFirstSelector = NewIdleFirstSelector(nil, cache, lookup) // Initialize the IdleFirstSelector with the cache
+	return lookup
 }
 
 type FunctionLookup struct {
@@ -45,6 +52,8 @@ type FunctionLookup struct {
 	rrSelector *RoundRobinSelector // Round-Robin selector for function endpoints
 	// SA - Add the PodStatusCache
 	podStatusCache *PodStatusCache // Cache for pod statuses
+	// SA - Add the idle-first selector
+	idleFirstSelector *IdleFirstSelector // IdleFirstSelector for function endpoints
 
 	// // SA - Add the Round-Robin strategy last index tracker
 	// // for each function-namespace combination.
@@ -70,6 +79,15 @@ func getNamespace(name, defaultNamespace string) string {
 		namespace = name[strings.LastIndexAny(name, ".")+1:]
 	}
 	return namespace
+}
+
+// SA - Add the setter for clientset
+func (f *FunctionLookup) SetIdleFirstSelectorClientset(clientset *kubernetes.Clientset) {
+	if f.idleFirstSelector == nil {
+		f.idleFirstSelector = NewIdleFirstSelector(clientset, f.podStatusCache, f)
+	} else {
+		f.idleFirstSelector.clientset = clientset
+	}
 }
 
 // This method resolves a function name to a URL.
@@ -110,7 +128,7 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, error) {
 	// creates the service with a single subset i.e.
 	// it looks for the available pods from the service/deployment
 	// and forwards the request to one of them.
-	// However, if there are no pods available, the faas-provider 
+	// However, if there are no pods available, the faas-provider
 	// interface handles the creation/scaling of the functions
 	// when the request arrives.
 	all := len(svc.Subsets[0].Addresses)
@@ -120,11 +138,18 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, error) {
 
 	target := rand.Intn(all)
 	// SA - ToDo: 1. Round-Robin selection
-	key := functionName + "." + namespace
-	target = l.rrSelector.Next(key, all)
-	log.Printf("Selected target index %d for function %s in namespace %s", target, functionName, namespace)
+	// key := functionName + "." + namespace
+	// target = l.rrSelector.Next(key, all)
+	// log.Printf("Selected target index %d for function %s in namespace %s", target, functionName, namespace)
 
-	// // SA - ToDo: 
+	// SA - ToDo: 2. Idle-first selection
+	target, _ = l.idleFirstSelector.Select(
+		svc.Subsets[0].Addresses,
+		functionName,
+		namespace,
+	)
+
+	// // SA - ToDo:
 	// // Instead of randomly selecting an address,
 	// // what other strategies could be used?
 	// // 1. Round-robin selection
@@ -156,7 +181,7 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, error) {
 	// -------------------------------
 
 	serviceIP := svc.Subsets[0].Addresses[target].IP
-	
+
 	podName := ""
 	//SA - ToDo: Update the Pod StatusCache with the selected pod and its IP
 	if targetRef := svc.Subsets[0].Addresses[target].TargetRef; targetRef != nil {
@@ -176,7 +201,7 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, error) {
 	}
 
 	// SA - Add the function name and namespace to the URL query parameters
-	if podName !="" {
+	if podName != "" {
 		q := urlRes.Query()
 		q.Set("podName", podName)
 		q.Set("podIP", serviceIP)

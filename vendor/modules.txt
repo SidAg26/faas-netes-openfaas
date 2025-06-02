@@ -140,7 +140,7 @@ github.com/opencontainers/go-digest
 github.com/opencontainers/image-spec/specs-go
 github.com/opencontainers/image-spec/specs-go/v1
 # github.com/openfaas/faas-provider v0.25.7 => /home/ubuntu/memFigLessDIR/faas-provider-openfaas
-## explicit; go 1.23
+## explicit; go 1.21
 github.com/openfaas/faas-provider
 github.com/openfaas/faas-provider/auth
 github.com/openfaas/faas-provider/httputil

@@ -6,17 +6,17 @@ package types
 
 // PodStatus represents the status of a pod
 type PodStatus struct {
-    Status    string `json:"status"`
-    Timestamp string `json:"timestamp"`
-    PodIP     string `json:"podIP"`
-    Function  string `json:"function"`
-    Namespace string `json:"namespace"`
+	PodName   string `json:"podName"`
+	Status    string `json:"status"`
+	Timestamp string `json:"timestamp"`
+	PodIP     string `json:"podIP"`
+	Function  string `json:"function"`
+	Namespace string `json:"namespace"`
 }
 
 // PodStatusUpdater defines the interface for updating pod status
 type PodStatusUpdater interface {
-    MarkPodBusy(podName, podIP string) error
-    MarkPodIdle(podName, podIP string) error
-    GetPodStatus(podName, podIP string) (PodStatus, bool)
+	MarkPodBusy(podName, podIP string) error
+	MarkPodIdle(podName, podIP string) error
+	GetPodStatus(podName, podIP string) (PodStatus, bool)
 }
-
