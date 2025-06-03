@@ -3,10 +3,10 @@ package k8s
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log" // SA - Add the logging package
 	"math/rand"
-	"net"
-	"strconv"
+	"net/http"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -184,7 +184,8 @@ func (s *IdleFirstSelector) scaleUpFunc(functionName, namespace string) error {
 	return err
 }
 
-// checkPodAvailable checks if a pod is available by attempting a TCP connection to its watchdog port.
+// checkPodAvailable checks if a pod is available by making an HTTP request to its /_/ready endpoint.
+// This respects the concurrency limits set in the of-watchdog.
 func (s *IdleFirstSelector) checkPodAvailable(podIP string) bool {
 	const watchdogPort = 8080
 	const timeout = 500 * time.Millisecond
@@ -193,12 +194,18 @@ func (s *IdleFirstSelector) checkPodAvailable(podIP string) bool {
 		return false
 	}
 
-	address := net.JoinHostPort(podIP, strconv.Itoa(watchdogPort))
-	conn, err := net.DialTimeout("tcp", address, timeout)
+	url := fmt.Sprintf("http://%s:%d/_/ready", podIP, watchdogPort)
+	client := &http.Client{
+		Timeout: timeout,
+	}
+
+	resp, err := client.Get(url)
 	if err != nil {
-		// Could not connect (pod not ready, network error, etc.)
+		log.Printf("Error checking pod availability for %s: %v", podIP, err)
 		return false
 	}
-	_ = conn.Close()
-	return true
+	defer resp.Body.Close()
+
+	// Only consider the pod available if it returns 200 OK
+	return resp.StatusCode == http.StatusOK
 }
