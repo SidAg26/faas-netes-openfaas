@@ -44,12 +44,16 @@ func AsFunctionStatus(item appsv1.Deployment) *types.FunctionStatus {
 	if lim.CPU != "0" || lim.Memory != "0" {
 		function.Limits = lim
 	}
-
+	// SA - Read the environment variables from the container spec
+	envVars := make(map[string]string)
 	for _, v := range functionContainer.Env {
+		envVars[v.Name] = v.Value
 		if EnvProcessName == v.Name {
 			function.EnvProcess = v.Value
 		}
 	}
+	// SA - Update the environment varibles in the function status
+	function.EnvVars = envVars
 
 	return &function
 }
