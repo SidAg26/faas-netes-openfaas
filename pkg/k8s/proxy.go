@@ -142,12 +142,16 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, error) {
 	// target = l.rrSelector.Next(key, all)
 	// log.Printf("Selected target index %d for function %s in namespace %s", target, functionName, namespace)
 
+	// var max_inflight int
 	// SA - ToDo: 2. Idle-first selection
 	target, _ = l.idleFirstSelector.Select(
 		svc.Subsets[0].Addresses,
 		functionName,
 		namespace,
 	)
+	if target < 0 || target >= all {
+		return url.URL{}, fmt.Errorf("invalid target index %d for function %s in namespace %s", target, functionName, namespace)
+	}
 
 	// // SA - ToDo:
 	// // Instead of randomly selecting an address,
@@ -186,7 +190,7 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, error) {
 	//SA - ToDo: Update the Pod StatusCache with the selected pod and its IP
 	if targetRef := svc.Subsets[0].Addresses[target].TargetRef; targetRef != nil {
 		podName = targetRef.Name
-		l.podStatusCache.Set(podName, "busy", serviceIP, functionName, namespace)
+		// l.podStatusCache.Set(podName, "busy", serviceIP, functionName, namespace, &max_inflight) // Already marked busy in the idle-first selector - Duplicate
 		log.Printf("Updated PodStatusCache for pod %s in function %s with IP %s as %s", podName, functionName, serviceIP, "BUSY")
 	} else {
 		log.Printf("No TargetRef found for address %s in function %s", serviceIP, functionName)
