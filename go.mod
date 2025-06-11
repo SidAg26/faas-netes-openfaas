@@ -24,6 +24,7 @@ replace github.com/openfaas/faas-netes => /home/ubuntu/memFigLessDIR/faas-netes-
 
 require (
 	github.com/google/go-containerregistry v0.20.3
+	golang.org/x/sync v0.15.0
 	k8s.io/code-generator v0.32.1
 )
 
@@ -67,7 +68,6 @@ require (
 	golang.org/x/mod v0.24.0 // indirect
 	golang.org/x/net v0.40.0 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
-	golang.org/x/sync v0.14.0 // indirect
 	golang.org/x/sys v0.33.0 // indirect
 	golang.org/x/term v0.32.0 // indirect
 	golang.org/x/text v0.25.0 // indirect
