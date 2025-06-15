@@ -178,7 +178,7 @@ func filterIdlePodsForAddresses(pods []PodStatus, addresses []corev1.EndpointAdd
 	}
 	idle := make([]PodStatus, 0, len(pods))
 	for _, pod := range pods {
-		if pod.Status == "idle" && pod.ActiveConnections <= max_inflight {
+		if pod.Status == "idle" && pod.ActiveConnections < max_inflight {
 			if _, ok := addrSet[pod.PodIP]; ok {
 				idle = append(idle, pod)
 			}
