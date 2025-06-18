@@ -201,6 +201,8 @@ func runController(setup serverSetup) {
 	functionLookup.SetIdleFirstSelectorClientset(kubeClient)
 	// SA - Register the function pod IP handler
 	faasProvider.Router().HandleFunc("/system/podstatus/{status}", handlers.MakePodIdleHandler(functionLookup)).Methods(http.MethodPost)
+	// SA - Register the function pods status fetcher
+	faasProvider.Router().HandleFunc("/system/podstatus/query", handlers.MakePodsStatusFetchHandler(functionLookup)).Methods(http.MethodGet)
 
 	printFunctionExecutionTime := true
 
