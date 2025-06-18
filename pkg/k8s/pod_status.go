@@ -161,8 +161,19 @@ func (p *PodStatusCache) GetByPodName(podName string) []PodStatus {
 	return result
 }
 
+// Add a function-level lock mechanism using the existing podLocks
+func (p *PodStatusCache) getFunctionLock(function, namespace string) *sync.Mutex {
+	key := "function-" + function + "-" + namespace
+	lockIface, _ := p.podLocks.LoadOrStore(key, &sync.Mutex{})
+	return lockIface.(*sync.Mutex)
+}
+
 // GetByFunction returns all pods for a specific function
 func (p *PodStatusCache) GetByFunction(function, namespace string) []PodStatus {
+	lock := p.getFunctionLock(function, namespace)
+	lock.Lock()
+	defer lock.Unlock()
+
 	var result []PodStatus // making sure to use a copy of the slice
 
 	p.cache.Range(func(key, value interface{}) bool {
@@ -205,8 +216,20 @@ func (p *PodStatusCache) GetByPodIP(podIP string) []PodStatus {
 	return result
 }
 
+// // SA - This function retrieves the global lock for the cache.
+// // It ensures that only one operation can modify the cache at a time.
+// func (p *PodStatusCache) getGlobalLock() *sync.Mutex {
+// 	key := "global-cache-lock"
+// 	lockIface, _ := p.podLocks.LoadOrStore(key, &sync.Mutex{})
+// 	return lockIface.(*sync.Mutex)
+// }
+
 // Prune the cache by removing old entries and keeping only the most recent status for each pod
 func (c *PodStatusCache) PruneByAddresses(function, namespace string, addresses []corev1.EndpointAddress, max_inflight int) {
+	lock := c.getFunctionLock(function, namespace)
+	lock.Lock()
+	defer lock.Unlock()
+
 	addrSet := make(map[string]corev1.EndpointAddress, len(addresses))
 	for _, addr := range addresses {
 		addrSet[addr.IP] = addr
