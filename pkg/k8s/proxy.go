@@ -85,8 +85,10 @@ func getNamespace(name, defaultNamespace string) string {
 func (f *FunctionLookup) SetIdleFirstSelectorClientset(clientset *kubernetes.Clientset) {
 	if f.idleFirstSelector == nil {
 		f.idleFirstSelector = NewIdleFirstSelector(clientset, f.podStatusCache, f)
+		f.idleFirstSelector.podStatusCache.clientset = clientset // Set the clientset in the IdleFirstSelector
 	} else {
 		f.idleFirstSelector.clientset = clientset
+		f.idleFirstSelector.podStatusCache.clientset = clientset // Update the clientset in the IdleFirstSelector's cache
 	}
 }
 

@@ -6,11 +6,14 @@
 package k8s
 
 import (
+	"context"
 	"log"
 	"sync"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"                   // SA - Importing the corev1 package for Kubernetes core API interactions
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1" // SA - Importing the metav1 package for Kubernetes API interactions
+	"k8s.io/client-go/kubernetes"                 // SA - Importing the Kubernetes client package
 )
 
 // PodStatus represents the status of a pod
@@ -27,8 +30,9 @@ type PodStatus struct {
 
 // PodStatusCache provides a thread-safe cache for pod status
 type PodStatusCache struct {
-	cache    sync.Map // Maps podName-IP -> PodStatus
-	podLocks sync.Map // Maps podName-IP -> *sync.Mutex for per-pod locking
+	cache     sync.Map              // Maps podName-IP -> PodStatus
+	podLocks  sync.Map              // Maps podName-IP -> *sync.Mutex for per-pod locking
+	clientset *kubernetes.Clientset // Optional: Kubernetes client for interacting with the API
 }
 
 // NewPodStatusCache creates a new pod status cache
@@ -224,14 +228,39 @@ func (p *PodStatusCache) GetByPodIP(podIP string) []PodStatus {
 // 	return lockIface.(*sync.Mutex)
 // }
 
+// Helper to refresh addresses from Kubernetes Endpoints
+func refreshAddresses(functionName, namespace string, clientset *kubernetes.Clientset) []corev1.EndpointAddress {
+	endpoints, err := clientset.CoreV1().Endpoints(namespace).Get(context.TODO(), functionName, metav1.GetOptions{})
+	if err != nil || len(endpoints.Subsets) == 0 {
+		return nil
+	}
+	var all []corev1.EndpointAddress
+	for _, subset := range endpoints.Subsets {
+		all = append(all, subset.Addresses...)
+	}
+	log.Printf("Refreshed addresses for function %s in namespace %s: %d addresses found", functionName, namespace, len(all))
+	return all
+}
+
 // Prune the cache by removing old entries and keeping only the most recent status for each pod
-func (c *PodStatusCache) PruneByAddresses(function, namespace string, addresses []corev1.EndpointAddress, max_inflight int) {
+func (c *PodStatusCache) PruneByAddresses(function, namespace string,
+	clientset *kubernetes.Clientset, addresses *[]corev1.EndpointAddress,
+	max_inflight int) {
 	lock := c.getFunctionLock(function, namespace)
 	lock.Lock()
 	defer lock.Unlock()
 
-	addrSet := make(map[string]corev1.EndpointAddress, len(addresses))
-	for _, addr := range addresses {
+	// 0. Refresh addresses from Kubernetes Endpoints
+	validAddresses := refreshAddresses(function, namespace, clientset)
+	if validAddresses == nil {
+		log.Printf("Failed to refresh addresses for function %s in namespace %s", function, namespace)
+	}
+	if addresses == nil || len(*addresses) == 0 {
+		// If no addresses are provided or the refresh failed, use the refreshed addresses
+		addresses = &validAddresses
+	}
+	addrSet := make(map[string]corev1.EndpointAddress, len(*addresses))
+	for _, addr := range *addresses {
 		addrSet[addr.IP] = addr
 	}
 	// 1. Remove stale entries

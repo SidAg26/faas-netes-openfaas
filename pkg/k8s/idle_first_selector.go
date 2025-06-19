@@ -72,7 +72,7 @@ func (s *IdleFirstSelector) Select(
 	}
 
 	// 1. Sync cache with endpoints (removes stale, adds new as idle)
-	s.podStatusCache.PruneByAddresses(functionName, namespace, addresses, max_inflight)
+	s.podStatusCache.PruneByAddresses(functionName, namespace, s.clientset, &addresses, max_inflight)
 
 	// 2. Try to find an idle pod and use it
 	podStatuses := s.podStatusCache.GetByFunction(functionName, namespace)
@@ -90,7 +90,7 @@ func (s *IdleFirstSelector) Select(
 						return i, nil
 					} else {
 						// The pod was marked busy by another request, try again
-						s.podStatusCache.PruneByAddresses(functionName, namespace, addresses, max_inflight)
+						s.podStatusCache.PruneByAddresses(functionName, namespace, s.clientset, &addresses, max_inflight)
 						idlePods = filterIdlePodsForAddresses(podStatuses, addresses, max_inflight)
 						continue
 					}
