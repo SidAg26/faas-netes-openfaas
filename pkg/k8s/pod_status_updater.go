@@ -47,6 +47,10 @@ func (l *FunctionLookup) GetPodStatusByFunction(functionName string, namespace s
 	statuses := l.podStatusCache.GetByFunction(functionName, namespace)
 	result := make([]providertypes.PodStatus, 0, len(statuses))
 
+	if len(statuses) == 0 {
+		return result, nil
+	}
+
 	for _, status := range statuses {
 		if status.Namespace == namespace {
 			result = append(result, providertypes.PodStatus{
