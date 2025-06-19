@@ -27,12 +27,16 @@ func MakePodsStatusFetchHandler(lookup *k8s.FunctionLookup) http.HandlerFunc {
 			http.Error(w, "no pods found", http.StatusNotFound)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		if err := json.NewEncoder(w).Encode(statuses); err != nil {
+
+		responseBytes, err := json.Marshal(statuses)
+		if err != nil {
 			http.Error(w, "failed to encode response", http.StatusInternalServerError)
 			return
 		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(responseBytes)
 
 	}
 }
