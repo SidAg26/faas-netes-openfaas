@@ -36,6 +36,26 @@ type IdleFirstSelector struct {
 	maxInflightGroup singleflight.Group // For deduplication of max_inflight requests
 	maxInflightCache sync.Map           // Cache for max_inflight values map[string]int
 	// Maps "namespace/functionName" to max_inflight value
+
+	// SA - Adding requestQueue to manage queued requests
+	requestQueue map[string]chan *QueuedRequest // functionName.namespace -> queue
+	queueMux     sync.RWMutex
+}
+
+type QueuedRequest struct {
+	Addresses    []corev1.EndpointAddress
+	FunctionName string
+	Namespace    string
+	ResponseChan chan QueueResult
+	StartTime    time.Time
+	MaxWaitTime  time.Duration
+	RetryCount   int // Add retry counter
+	MaxRetries   int // Maximum retry attempts
+}
+
+type QueueResult struct {
+	Index int
+	Error error
 }
 
 func NewIdleFirstSelector(clientset *kubernetes.Clientset, podStatusCache *PodStatusCache, functionLookup *FunctionLookup) *IdleFirstSelector {
@@ -43,13 +63,14 @@ func NewIdleFirstSelector(clientset *kubernetes.Clientset, podStatusCache *PodSt
 		clientset:      clientset,
 		podStatusCache: podStatusCache,
 		functionLookup: functionLookup,
+		requestQueue:   make(map[string]chan *QueuedRequest),
 	}
 }
 
 // Select returns the index of the pod to use, or -1 if none found.
 // It implements the idle-first logic described in your prompt.
 func (s *IdleFirstSelector) Select(
-	addresses []corev1.EndpointAddress,
+	addresses []corev1.EndpointAddress, requestID string, // SA - Add requestID for tracing
 	functionName, namespace string,
 ) (int, error) {
 	// // Helper to refresh addresses from Kubernetes Endpoints
@@ -68,39 +89,42 @@ func (s *IdleFirstSelector) Select(
 	max_inflight, err := s.getFunctionMaxInflight(functionName, namespace)
 	if err != nil {
 		max_inflight = math.MaxInt32 // Default to maximum if not found allow infinite inflight requests
-		log.Printf("Error getting max_inflight for function %s in namespace %s: %v", functionName, namespace, err)
+		log.Printf("[REQ:%s] Error getting max_inflight for function %s in namespace %s: %v", requestID, functionName, namespace, err)
 	}
 
 	// 1. Sync cache with endpoints (removes stale, adds new as idle)
-	s.podStatusCache.PruneByAddresses(functionName, namespace, s.clientset, &addresses, max_inflight)
+	s.podStatusCache.PruneByAddresses(requestID, functionName, namespace, s.clientset, &addresses, max_inflight)
 
 	// 2. Try to find an idle pod and use it
-	podStatuses := s.podStatusCache.GetByFunction(functionName, namespace)
-	idlePods := filterIdlePodsForAddresses(podStatuses, addresses, max_inflight)
-	tryCount := 0
-	for tryCount < 3 && len(idlePods) > 0 {
-		selected := idlePods[rand.Intn(len(idlePods))]
-		if s.checkPodAvailable(selected.PodIP) {
-			for i, addr := range addresses {
-				if addr.IP == selected.PodIP {
-					if s.podStatusCache.TryMarkPodBusy(selected.PodName, selected.PodIP) {
-						s.functionLookup.MarkPodBusy(selected.PodName, selected.PodIP)
-						// Found the index of the selected pod in the addresses list
-						log.Printf("Selected pod %s at index %d", selected.PodName, i)
-						return i, nil
-					} else {
-						// The pod was marked busy by another request, try again
-						s.podStatusCache.PruneByAddresses(functionName, namespace, s.clientset, &addresses, max_inflight)
-						idlePods = filterIdlePodsForAddresses(podStatuses, addresses, max_inflight)
-						continue
-					}
-
-				}
-			}
-		}
-		idlePods = removePodFromList(idlePods, selected.PodIP) // Pods that are unavailable not the busy ones
-		tryCount++
+	if index, err := s.trySelectIdlePod(requestID, addresses, functionName, namespace, max_inflight); err == nil {
+		return index, nil
 	}
+	// podStatuses := s.podStatusCache.GetByFunction(functionName, namespace)
+	// idlePods := filterIdlePodsForAddresses(podStatuses, addresses, max_inflight)
+	// tryCount := 0
+	// for tryCount < 3 && len(idlePods) > 0 {
+	// 	selected := idlePods[rand.Intn(len(idlePods))]
+	// 	if s.checkPodAvailable(selected.PodIP) {
+	// 		for i, addr := range addresses {
+	// 			if addr.IP == selected.PodIP {
+	// 				if s.podStatusCache.TryMarkPodBusy(selected.PodName, selected.PodIP) {
+	// 					s.functionLookup.MarkPodBusy(selected.PodName, selected.PodIP)
+	// 					// Found the index of the selected pod in the addresses list
+	// 					log.Printf("Selected pod %s at index %d", selected.PodName, i)
+	// 					return i, nil
+	// 				} else {
+	// 					// The pod was marked busy by another request, try again
+	// 					s.podStatusCache.PruneByAddresses(functionName, namespace, s.clientset, &addresses, max_inflight)
+	// 					idlePods = filterIdlePodsForAddresses(podStatuses, addresses, max_inflight)
+	// 					continue
+	// 				}
+
+	// 			}
+	// 		}
+	// 	}
+	// 	idlePods = removePodFromList(idlePods, selected.PodIP) // Pods that are unavailable not the busy ones
+	// 	tryCount++
+	// }
 	// --------------- REMOVING THE SCALING LOGIC FOR NOW ---------------
 	// // 3. No idle pods: scale up and record old pod IPs
 	// oldIPs := make(map[string]struct{}, len(addresses))
@@ -166,8 +190,196 @@ func (s *IdleFirstSelector) Select(
 	// }
 	// --------------- REMOVING THE SCALING LOGIC FOR NOW ---------------
 	// 5. No idle pods found, return error
-	log.Printf("No idle pods found for function %s in namespace %s, returning error", functionName, namespace)
-	return -1, errors.New("no idle pods available for function " + functionName + " in namespace " + namespace)
+	log.Printf("[REQ:%s] No idle pods found for function %s in namespace %s, returning error", requestID, functionName, namespace)
+	// return -1, errors.New("no idle pods available for function " + functionName + " in namespace " + namespace)
+	// Instead of returning an error, we can queue the request
+	return s.queueAndWaitForPod(requestID, addresses, functionName, namespace, max_inflight)
+}
+
+// SA - trySelectIdlePod attempts to select an idle pod from the provided addresses.
+// It returns the index of the selected pod or an error if no idle pods are available.
+func (s *IdleFirstSelector) trySelectIdlePod(requestID string, addresses []corev1.EndpointAddress, functionName, namespace string, max_inflight int) (int, error) {
+	podStatuses := s.podStatusCache.GetByFunction(functionName, namespace)
+	idlePods := filterIdlePodsForAddresses(podStatuses, addresses, max_inflight)
+
+	tryCount := 0
+	for tryCount < 3 && len(idlePods) > 0 {
+		selected := idlePods[rand.Intn(len(idlePods))]
+		if s.checkPodAvailable(selected.PodIP) {
+			for i, addr := range addresses {
+				if addr.IP == selected.PodIP {
+					if s.podStatusCache.TryMarkPodBusy(selected.PodName, selected.PodIP) {
+						s.functionLookup.MarkPodBusy(selected.PodName, selected.PodIP)
+						log.Printf("[REQ:%s][Select] Selected pod %s at index %d immediately", requestID, selected.PodName, i)
+						// EXPLICIT CHECK: Ensure we never return -1 with nil error
+						if i < 0 {
+							return -1, errors.New("invalid pod index")
+						}
+						return i, nil
+					} else {
+						// Pod was marked busy by another request, refresh and try again
+						s.podStatusCache.PruneByAddresses(requestID, functionName, namespace, s.clientset, &addresses, max_inflight)
+						podStatuses = s.podStatusCache.GetByFunction(functionName, namespace)
+						idlePods = filterIdlePodsForAddresses(podStatuses, addresses, max_inflight)
+						continue
+					}
+				}
+			}
+		}
+		idlePods = removePodFromList(idlePods, selected.PodIP)
+		tryCount++
+	}
+
+	return -1, errors.New("no idle pods available")
+}
+
+func (s *IdleFirstSelector) queueAndWaitForPod(requestID string, addresses []corev1.EndpointAddress, functionName, namespace string, max_inflight int) (int, error) {
+	key := functionName + "." + namespace
+
+	// Create or get the queue for this function
+	s.queueMux.Lock()
+	queue, exists := s.requestQueue[key]
+	if !exists {
+		queue = make(chan *QueuedRequest, 10) // Buffer of 10 requests per function
+		s.requestQueue[key] = queue
+		go s.processQueue(requestID, key, functionName, namespace) // Start queue processor
+	}
+	s.queueMux.Unlock()
+
+	// Create queued request with retry settings
+	queuedRequest := &QueuedRequest{
+		Addresses:    addresses,
+		FunctionName: functionName,
+		Namespace:    namespace,
+		ResponseChan: make(chan QueueResult, 1),
+		StartTime:    time.Now(),
+		MaxWaitTime:  100 * time.Millisecond,
+		RetryCount:   0,  // Start with 0 retries
+		MaxRetries:   10, // Allow up to 10 retries (10ms * 10 = 100ms max)
+	}
+
+	// Try to enqueue
+	select {
+	case queue <- queuedRequest:
+		// Wait for result from queue processor
+		select {
+		case result := <-queuedRequest.ResponseChan:
+			if result.Error != nil {
+				log.Printf("[REQ:%s] [Queue] Request for %s.%s failed after %v: %v",
+					requestID, functionName, namespace, time.Since(queuedRequest.StartTime), result.Error)
+				return -1, result.Error
+			}
+			log.Printf("[REQ:%s] [Queue] Request for %s.%s succeeded after %v, pod index: %d",
+				requestID, functionName, namespace, time.Since(queuedRequest.StartTime), result.Index)
+			return result.Index, nil
+
+		case <-time.After(150 * time.Millisecond): // 50ms buffer beyond the 100ms wait
+			return -1, fmt.Errorf("[REQ:%s] request timeout after 150ms waiting for idle pod", requestID)
+		}
+
+	default:
+		// Queue is full
+		return -1, fmt.Errorf("[REQ:%s] request queue full for function %s.%s", requestID, functionName, namespace)
+	}
+}
+
+// SA - Process the queue for a specific function
+func (s *IdleFirstSelector) processQueue(requestID, key, functionName, namespace string) {
+	s.queueMux.RLock()
+	queue := s.requestQueue[key]
+	s.queueMux.RUnlock()
+
+	ticker := time.NewTicker(10 * time.Millisecond) // Check every 10ms
+	defer ticker.Stop()
+
+	log.Printf("[REQ:%s] [Queue] Started queue processor for %s.%s", requestID, functionName, namespace)
+
+	for {
+		select {
+		case queuedRequest := <-queue:
+			log.Printf("[REQ:%s] [Queue] Processing request for %s.%s (attempt %d/%d, elapsed: %v)",
+				requestID, functionName, namespace, queuedRequest.RetryCount+1, queuedRequest.MaxRetries+1,
+				time.Since(queuedRequest.StartTime))
+
+			// Check if request has timed out
+			elapsed := time.Since(queuedRequest.StartTime)
+			if elapsed > queuedRequest.MaxWaitTime {
+				log.Printf("[REQ:%s] [Queue] Request timed out after %v for %s.%s", requestID, elapsed, functionName, namespace)
+				queuedRequest.ResponseChan <- QueueResult{
+					Index: -1,
+					Error: fmt.Errorf("[REQ:%s] request timeout after %v", requestID, elapsed),
+				}
+				continue
+			}
+
+			// Try to get max_inflight again (in case it changed)
+			max_inflight, err := s.getFunctionMaxInflight(functionName, namespace)
+			if err != nil {
+				max_inflight = math.MaxInt32
+			}
+
+			// Refresh pod status and try to select an idle pod
+			s.podStatusCache.PruneByAddresses(requestID, functionName, namespace, s.clientset, &queuedRequest.Addresses, max_inflight)
+
+			if index, err := s.trySelectIdlePod(requestID, queuedRequest.Addresses, functionName, namespace, max_inflight); err == nil {
+				// SUCCESS: Found an idle pod
+				if index >= 0 && index < len(queuedRequest.Addresses) {
+					log.Printf("[REQ:%s] [Queue] SUCCESS: Found idle pod at index %d for %s.%s after %v (attempt %d)",
+						requestID, index, functionName, namespace, elapsed, queuedRequest.RetryCount+1)
+					queuedRequest.ResponseChan <- QueueResult{
+						Index: index,
+						Error: nil,
+					}
+				} else {
+					log.Printf("[REQ:%s] [Queue] ERROR: Invalid index %d returned for %s.%s", requestID, index, functionName, namespace)
+					queuedRequest.ResponseChan <- QueueResult{
+						Index: -1,
+						Error: fmt.Errorf("[REQ:%s] invalid pod index returned: %d", requestID, index),
+					}
+				}
+			} else {
+				// Still no idle pods - check if we should retry or give up
+				if queuedRequest.RetryCount < queuedRequest.MaxRetries && elapsed < queuedRequest.MaxWaitTime {
+					// Increment retry count and requeue
+					queuedRequest.RetryCount++
+					select {
+					case queue <- queuedRequest:
+						log.Printf("[REQ:%s] [Queue] Requeued request for %s.%s (attempt %d/%d, elapsed: %v)",
+							requestID, functionName, namespace, queuedRequest.RetryCount, queuedRequest.MaxRetries+1, elapsed)
+					default:
+						// Queue full, fail the request
+						log.Printf("[REQ:%s] [Queue] Queue full when trying to requeue %s.%s after %d attempts",
+							requestID, functionName, namespace, queuedRequest.RetryCount)
+						queuedRequest.ResponseChan <- QueueResult{
+							Index: -1,
+							Error: fmt.Errorf("[REQ:%s] queue full, cannot requeue request after %d attempts", requestID, queuedRequest.RetryCount),
+						}
+					}
+				} else {
+					// Max retries exceeded or timeout
+					if queuedRequest.RetryCount >= queuedRequest.MaxRetries {
+						log.Printf("[REQ:%s] [Queue] Max retries (%d) exceeded for %s.%s after %v",
+							requestID, queuedRequest.MaxRetries, functionName, namespace, elapsed)
+						queuedRequest.ResponseChan <- QueueResult{
+							Index: -1,
+							Error: fmt.Errorf("[REQ:%s] max retries (%d) exceeded, no idle pods available", requestID, queuedRequest.MaxRetries),
+						}
+					} else {
+						log.Printf("[REQ:%s] [Queue] Timeout reached for %s.%s after %v (attempt %d)",
+							requestID, functionName, namespace, elapsed, queuedRequest.RetryCount+1)
+						queuedRequest.ResponseChan <- QueueResult{
+							Index: -1,
+							Error: fmt.Errorf("[REQ:%s] no idle pods became available within %v", requestID, queuedRequest.MaxWaitTime),
+						}
+					}
+				}
+			}
+
+			//  case <-ticker.C:
+			// 	// Periodic tick - could be used for metrics or cleanup if needed
+			// 	continue
+		}
+	}
 }
 
 // Helper to filter idle pods that are in the addresses list
