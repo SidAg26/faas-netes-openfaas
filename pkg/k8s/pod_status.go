@@ -243,7 +243,7 @@ func refreshAddresses(functionName, namespace string, clientset *kubernetes.Clie
 }
 
 // Prune the cache by removing old entries and keeping only the most recent status for each pod
-func (c *PodStatusCache) PruneByAddresses(function, namespace string,
+func (c *PodStatusCache) PruneByAddresses(requestID, function, namespace string,
 	clientset *kubernetes.Clientset, addresses *[]corev1.EndpointAddress,
 	max_inflight int) {
 	lock := c.getFunctionLock(function, namespace)
@@ -253,7 +253,7 @@ func (c *PodStatusCache) PruneByAddresses(function, namespace string,
 	// 0. Refresh addresses from Kubernetes Endpoints
 	validAddresses := refreshAddresses(function, namespace, clientset)
 	if validAddresses == nil {
-		log.Printf("Failed to refresh addresses for function %s in namespace %s", function, namespace)
+		log.Printf("[REQ:%s] Failed to refresh addresses for function %s in namespace %s", requestID, function, namespace)
 	}
 	if addresses == nil || len(*addresses) == 0 {
 		// If no addresses are provided or the refresh failed, use the refreshed addresses

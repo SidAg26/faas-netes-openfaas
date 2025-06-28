@@ -177,6 +177,7 @@ func proxyRequest(w http.ResponseWriter, originalReq *http.Request, proxyClient 
 	podIP := functionAddr.Query().Get("podIP")
 	podName := functionAddr.Query().Get("podName")
 	podNamespace := functionAddr.Query().Get("podNamespace")
+	internalID := functionAddr.Query().Get("OpenFaaS-Internal-ID")
 
 	proxyReq, err := buildProxyRequest(originalReq, functionAddr, pathVars["params"])
 	if err != nil {
@@ -233,6 +234,10 @@ func proxyRequest(w http.ResponseWriter, originalReq *http.Request, proxyClient 
 	w.Header().Set("X-OpenFaaS-Pod-IP", podIP)
 	w.Header().Set("X-OpenFaaS-Pod-Name", podName)
 	w.Header().Set("X-OpenFaaS-Pod-Namespace", podNamespace)
+	// SA - Set the internal ID in the response header
+	if internalID != "" {
+		w.Header().Set("X-OpenFaaS-Internal-ID", internalID)
+	}
 
 	w.WriteHeader(response.StatusCode)
 	if response.Body != nil {

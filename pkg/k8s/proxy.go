@@ -92,6 +92,14 @@ func (f *FunctionLookup) SetIdleFirstSelectorClientset(clientset *kubernetes.Cli
 	}
 }
 
+// SA - randomID generates a random ID for tracing purposes
+// This function generates a random 16-byte ID and returns it as a hexadecimal string.
+func randomID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return fmt.Sprintf("%x", b)
+}
+
 // This method resolves a function name to a URL.
 // It extracts the function name and namespace from the provided name,
 // verifies the namespace, and retrieves the corresponding service endpoints.
@@ -99,6 +107,8 @@ func (f *FunctionLookup) SetIdleFirstSelectorClientset(clientset *kubernetes.Cli
 // If successful, it randomly selects an address from the service's endpoints
 // and constructs a URL pointing to the function's watchdog port (8080).
 func (l *FunctionLookup) Resolve(name string) (url.URL, error) {
+	// SA - Add a random ID for tracing
+	requestID := randomID()
 	functionName := name
 	namespace := getNamespace(name, l.DefaultNamespace)
 	if err := l.verifyNamespace(namespace); err != nil {
@@ -138,7 +148,7 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, error) {
 		return url.URL{}, fmt.Errorf("no addresses in subset for \"%s.%s\"", functionName, namespace)
 	}
 
-	target := rand.Intn(all)
+	// target := rand.Intn(all) // Random selection of an address
 	// SA - ToDo: 1. Round-Robin selection
 	// key := functionName + "." + namespace
 	// target = l.rrSelector.Next(key, all)
@@ -146,13 +156,25 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, error) {
 
 	// var max_inflight int
 	// SA - ToDo: 2. Idle-first selection
-	target, _ = l.idleFirstSelector.Select(
+	target, err := l.idleFirstSelector.Select(
 		svc.Subsets[0].Addresses,
+		requestID, // SA - Pass the requestID for tracing
 		functionName,
 		namespace,
 	)
+
+	if err != nil {
+		// Handle different types of queue/selection errors
+		if strings.Contains(err.Error(), "timeout") {
+			return url.URL{}, fmt.Errorf("[REQ:%s] service temporarily unavailable for \"%s.%s\": %v", requestID, functionName, namespace, err)
+		} else if strings.Contains(err.Error(), "queue full") {
+			return url.URL{}, fmt.Errorf("[REQ:%s] service overloaded for \"%s.%s\": %v", requestID, functionName, namespace, err)
+		} else {
+			return url.URL{}, fmt.Errorf("[REQ:%s] no available pods for \"%s.%s\": %v", requestID, functionName, namespace, err)
+		}
+	}
 	if target < 0 || target >= all {
-		return url.URL{}, fmt.Errorf("invalid target index %d for function %s in namespace %s", target, functionName, namespace)
+		return url.URL{}, fmt.Errorf("[REQ:%s] invalid target index %d for function %s in namespace %s", requestID, target, functionName, namespace)
 	}
 
 	// // SA - ToDo:
@@ -193,9 +215,9 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, error) {
 	if targetRef := svc.Subsets[0].Addresses[target].TargetRef; targetRef != nil {
 		podName = targetRef.Name
 		// l.podStatusCache.Set(podName, "busy", serviceIP, functionName, namespace, &max_inflight) // Already marked busy in the idle-first selector - Duplicate
-		log.Printf("Updated PodStatusCache for pod %s in function %s with IP %s as %s", podName, functionName, serviceIP, "BUSY")
+		log.Printf("[REQ:%s] Updated PodStatusCache for pod %s in function %s with IP %s as %s", requestID, podName, functionName, serviceIP, "BUSY")
 	} else {
-		log.Printf("No TargetRef found for address %s in function %s", serviceIP, functionName)
+		log.Printf("[REQ:%s] No TargetRef found for address %s in function %s", requestID, serviceIP, functionName)
 	}
 	// ---------------------------------
 
@@ -212,8 +234,9 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, error) {
 		q.Set("podName", podName)
 		q.Set("podIP", serviceIP)
 		q.Set("podNamespace", namespace)
+		q.Set("OpenFaaS-Internal-ID", requestID) // Add the request ID for tracing
 		urlRes.RawQuery = q.Encode()
-		log.Printf("Resolved URL for function %s in namespace %s: %s with pod %s and IP %s", functionName, namespace, urlRes.String(), podName, serviceIP)
+		log.Printf("[REQ:%s] Resolved URL for function %s in namespace %s: %s with pod %s and IP %s", requestID, functionName, namespace, urlRes.String(), podName, serviceIP)
 	}
 
 	return *urlRes, nil
