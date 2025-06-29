@@ -12,12 +12,47 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/singleflight"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1" // for Deployment envVariable access
 	"k8s.io/client-go/kubernetes"
 )
+
+// Queue depth metric (this was missing!)
+var (
+	queueDepthGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "gateway_queue_depth",
+			Help: "Current depth of function request queues",
+		},
+		[]string{"function_name", "namespace"},
+	)
+)
+
+// SA - Metric registration for queue depth of the function
+func init() {
+	err := prometheus.Register(queueDepthGauge)
+	if err != nil {
+		if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
+			// Use existing metric if already registered
+			if existingGauge, ok := are.ExistingCollector.(*prometheus.GaugeVec); ok {
+				queueDepthGauge = existingGauge
+				log.Printf("Queue depth metric already registered, using existing collector")
+			}
+		} else {
+			log.Printf("Warning: Failed to register queue depth metric: %v", err)
+		}
+	} else {
+		log.Printf("Queue depth metric registered successfully")
+	}
+}
+
+// UpdateQueueDepth updates the queue depth metric
+func UpdateQueueDepth(functionName, namespace string, depth int) {
+	queueDepthGauge.WithLabelValues(functionName, namespace).Set(float64(depth))
+}
 
 // PodStatus should be defined elsewhere in your codebase
 // type PodStatus struct {
@@ -244,6 +279,11 @@ func (s *IdleFirstSelector) queueAndWaitForPod(requestID string, addresses []cor
 		s.requestQueue[key] = queue
 		go s.processQueue(requestID, key, functionName, namespace) // Start queue processor
 	}
+
+	// Update queue depth metric
+	currentDepth := len(queue)
+	UpdateQueueDepth(functionName, namespace, currentDepth)
+
 	s.queueMux.Unlock()
 
 	// Create queued request with retry settings
