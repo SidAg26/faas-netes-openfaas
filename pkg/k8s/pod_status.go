@@ -7,7 +7,9 @@ package k8s
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"net/http"
 	"sync"
 	"time"
 
@@ -26,6 +28,7 @@ type PodStatus struct {
 	Namespace         string    // The namespace of the pod
 	ActiveConnections int       // The number of active connections to the pod - for "max_inflight" support
 	MaxInflight       *int      // Optional: Maximum number of inflight requests for this pod
+	PodUID            string    // Optional: Unique identifier for the pod, if available
 }
 
 // PodStatusCache provides a thread-safe cache for pod status
@@ -111,6 +114,9 @@ func (p *PodStatusCache) Set(podName, status, podIP, function, namespace string,
 		} else if status == "idle" {
 			activeConnections = max(current.ActiveConnections-1, 0)
 			finalStatus = "idle"
+		} else if status == "reset" {
+			activeConnections = 0
+			finalStatus = "idle" // Resetting to idle
 		} else {
 			activeConnections = current.ActiveConnections
 			finalStatus = status
@@ -125,6 +131,13 @@ func (p *PodStatusCache) Set(podName, status, podIP, function, namespace string,
 			finalStatus = "idle" // If not at max inflight, we consider it idle
 		}
 	}
+	// Get current pod UID if clientset is available
+	var podUID string
+	if p.clientset != nil {
+		if pod, err := p.clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metav1.GetOptions{}); err == nil {
+			podUID = string(pod.UID)
+		}
+	}
 
 	log.Printf("Setting pod status: %s, IP: %s, Function: %s, Namespace: %s, Status: %s, ActiveConnections: %d",
 		podName, podIP, function, namespace, finalStatus, activeConnections)
@@ -137,6 +150,7 @@ func (p *PodStatusCache) Set(podName, status, podIP, function, namespace string,
 		PodName:           podName,
 		ActiveConnections: activeConnections,
 		MaxInflight:       maxInflight,
+		PodUID:            podUID, // Optional: You can set this if you have the pod UID available
 	})
 }
 
@@ -182,13 +196,39 @@ func (p *PodStatusCache) GetByFunction(function, namespace string) []PodStatus {
 
 	p.cache.Range(func(key, value interface{}) bool {
 		status := value.(PodStatus)
-		if status.Function == function && status.Namespace == namespace {
+		if status.Function == function && status.Namespace == namespace && checkPodAvailable(status.PodIP) {
 			result = append(result, status)
 		}
 		return true
 	})
 
 	return result // This is a copy of the slice, not a reference for safe use
+}
+
+func checkPodAvailable(podIP string) bool {
+	const watchdogPort = 8080
+	const timeout = 500 * time.Millisecond
+
+	if podIP == "" {
+		return false
+	}
+
+	// url := fmt.Sprintf("http://%s:%d/_/ready", podIP, watchdogPort)
+	// Use /_/health endpoint for availability check since not all functions may implement /_/ready
+	url := fmt.Sprintf("http://%s:%d/_/health", podIP, watchdogPort)
+	client := &http.Client{
+		Timeout: timeout,
+	}
+
+	resp, err := client.Get(url)
+	if err != nil {
+		log.Printf("Error checking pod availability for %s: %v", podIP, err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	// Only consider the pod available if it returns 200 OK
+	return resp.StatusCode == http.StatusOK
 }
 
 // GetAll returns all pod statuses
@@ -273,13 +313,32 @@ func (c *PodStatusCache) PruneByAddresses(requestID, function, namespace string,
 		}
 		return true
 	})
-	// 2. Add new endpoints as idle if not present
+	// 2. Add new endpoints as idle if not present AND check for pod restarts
 	for ip, addr := range addrSet {
 		found := false
 		c.cache.Range(func(key, value interface{}) bool {
 			pod := value.(PodStatus)
 			if pod.Function == function && pod.Namespace == namespace && pod.PodIP == ip {
 				found = true
+
+				log.Printf("[REQ:%s] Checking pod UID for %s in namespace %s", requestID, pod.PodName, namespace)
+				// Check if pod restarted by comparing UIDs
+				if clientset != nil && addr.TargetRef != nil {
+					currentPod, err := clientset.CoreV1().Pods(namespace).Get(context.TODO(), addr.TargetRef.Name, metav1.GetOptions{})
+					if err == nil && string(currentPod.UID) != pod.PodUID {
+						log.Printf("[REQ:%s] [UID-RESET] Pod %s UID changed: cached=%s, current=%s",
+							requestID, pod.PodName, pod.PodUID, string(currentPod.UID))
+						c.Set(pod.PodName, "reset", ip, function, namespace, pod.MaxInflight)
+						c.setPodUID(pod.PodName, ip, string(currentPod.UID)) // Update the UID in the cache
+					} else if err != nil {
+						log.Printf("[REQ:%s] [UID-ERROR] Failed to get current pod %s: %v",
+							requestID, pod.PodName, err)
+					}
+				} else {
+					log.Printf("[REQ:%s] [UID-INFO] No TargetRef for address %s, using cached UID %s",
+						requestID, ip, pod.PodUID)
+				}
+
 				return false // stop searching
 			}
 			return true
@@ -287,10 +346,33 @@ func (c *PodStatusCache) PruneByAddresses(requestID, function, namespace string,
 		if !found {
 			// Use addr.TargetRef.Name if available, else use IP as PodName
 			podName := ip
+			var podUID string
 			if addr.TargetRef != nil && addr.TargetRef.Name != "" {
 				podName = addr.TargetRef.Name
+				if pod, err := clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metav1.GetOptions{}); err == nil {
+					podUID = string(pod.UID)
+				}
 			}
 			c.Set(podName, "idle", ip, function, namespace, &max_inflight)
+			c.setPodUID(podName, ip, podUID) // Set the UID in the cache if available
 		}
+	}
+}
+
+func (p *PodStatusCache) setPodUID(podName, podIP, podUID string) {
+	key := p.createKey(podName, podIP)
+
+	// Lock per-pod (using a sync.Map of mutexes)
+	lockIface, _ := p.podLocks.LoadOrStore(key, &sync.Mutex{})
+	lock := lockIface.(*sync.Mutex)
+	lock.Lock()
+	defer lock.Unlock()
+
+	if value, exists := p.cache.Load(key); exists {
+		current := value.(PodStatus)
+		current.PodUID = podUID
+		p.cache.Store(key, current)
+	} else {
+		log.Printf("Pod %s not found in cache to set UID", key)
 	}
 }

@@ -234,6 +234,7 @@ func (s *IdleFirstSelector) Select(
 // SA - trySelectIdlePod attempts to select an idle pod from the provided addresses.
 // It returns the index of the selected pod or an error if no idle pods are available.
 func (s *IdleFirstSelector) trySelectIdlePod(requestID string, addresses []corev1.EndpointAddress, functionName, namespace string, max_inflight int) (int, error) {
+	s.podStatusCache.PruneByAddresses(requestID, functionName, namespace, s.clientset, &addresses, max_inflight)
 	podStatuses := s.podStatusCache.GetByFunction(functionName, namespace)
 	idlePods := filterIdlePodsForAddresses(podStatuses, addresses, max_inflight)
 
@@ -432,7 +433,17 @@ func filterIdlePodsForAddresses(pods []PodStatus, addresses []corev1.EndpointAdd
 	for _, pod := range pods {
 		if pod.Status == "idle" && pod.ActiveConnections < max_inflight {
 			if _, ok := addrSet[pod.PodIP]; ok {
-				idle = append(idle, pod)
+				// Check if the pod is available
+				if checkPodAvailable(pod.PodIP) {
+					// Only add if the pod is available
+					idle = append(idle, pod)
+				} else {
+					log.Printf("Pod %s is idle but not available at IP %s, removing from idle list", pod.PodName, pod.PodIP)
+					// If the pod is not available, we can remove it from the idle list
+					// This is optional based on your logic, you might want to keep it for retrying later
+					idle = removePodFromList(idle, pod.PodIP) // Uncomment if you want to remove unavailable pods
+					continue
+				}
 			}
 		}
 	}
