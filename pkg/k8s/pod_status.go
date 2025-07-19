@@ -411,6 +411,12 @@ func (c *PodStatusCache) PruneByAddresses(requestID, function, namespace string,
 					} else if err != nil {
 						log.Printf("[REQ:%s] [UID-ERROR] Failed to get current pod %s: %v",
 							requestID, pod.PodName, err)
+					} else {
+						// reset pods that have been busy for too long
+						if pod.Status == "busy" && time.Since(pod.Timestamp) > 15*time.Minute {
+							log.Printf("[REQ:%s] [UID-RESET] Pod %s is busy for too long, resetting...", requestID, pod.PodName)
+							c.Set(pod.PodName, "reset", ip, function, namespace, pod.MaxInflight)
+						}
 					}
 				} else {
 					log.Printf("[REQ:%s] [UID-INFO] No TargetRef for address %s, using cached UID %s",
