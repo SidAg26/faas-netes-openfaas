@@ -189,98 +189,119 @@ func (p *PodStatusCache) getFunctionLock(function, namespace string) *sync.Mutex
 
 // GetByFunction returns all pods for a specific function
 func (p *PodStatusCache) GetByFunction(function, namespace string) []PodStatus {
-	lock := p.getFunctionLock(function, namespace)
-	lock.Lock()
-	defer lock.Unlock()
+    lock := p.getFunctionLock(function, namespace)
+    lock.Lock()
+    defer lock.Unlock()
 
-	var result []PodStatus                                             // making sure to use a copy of the slice
-	addresses := refreshAddresses(function, namespace, p.clientset)    // Refresh addresses before filtering
-	addrSet := make(map[string]corev1.EndpointAddress, len(addresses)) // Use a map to track unique addresses
-	for _, addr := range addresses {
-		addrSet[addr.IP] = addr
-	}
-	// 1. Remove stale entries
-	p.cache.Range(func(key, value interface{}) bool {
-		pod := value.(PodStatus)
-		if pod.Function == function && pod.Namespace == namespace {
-			if _, ok := addrSet[pod.PodIP]; !ok {
-				p.cache.Delete(key)
-			}
-		}
-		return true
-	})
-	var max_inflight int
-	// 2. Add new endpoints as idle if not present AND check for pod restarts
-	for ip, addr := range addrSet {
-		found := false
-		p.cache.Range(func(key, value interface{}) bool {
-			pod := value.(PodStatus)
-			if pod.Function == function && pod.Namespace == namespace && pod.PodIP == ip {
-				found = true
-				log.Printf("[REQ:%s] Checking pod UID for %s in namespace %s", "not capturing", pod.PodName, namespace)
-				// Check if pod restarted by comparing UIDs
-				if p.clientset != nil && addr.TargetRef != nil {
-					currentPod, err := p.clientset.CoreV1().Pods(namespace).Get(context.TODO(), addr.TargetRef.Name, metav1.GetOptions{})
-					if err == nil && string(currentPod.UID) != pod.PodUID {
-						log.Printf("[REQ:%s] [UID-RESET] Pod %s UID changed: cached=%s, current=%s",
-							"not capturing", pod.PodName, pod.PodUID, string(currentPod.UID))
-						p.Set(pod.PodName, "reset", ip, function, namespace, pod.MaxInflight)
-						p.setPodUID(pod.PodName, ip, string(currentPod.UID)) // Update the UID in the cache
-					} else if err != nil {
-						log.Printf("[REQ:%s] [UID-ERROR] Failed to get current pod %s: %v",
-							"not capturing", pod.PodName, err)
-					}
-				} else {
-					log.Printf("[REQ:%s] [UID-INFO] No TargetRef for address %s, using cached UID %s",
-						"not capturing", ip, pod.PodUID)
-				}
+    var result []PodStatus
+    addresses := refreshAddresses(function, namespace, p.clientset)
+    addrSet := make(map[string]corev1.EndpointAddress, len(addresses))
+    for _, addr := range addresses {
+        addrSet[addr.IP] = addr
+    }
 
-				return false // stop searching
-			}
-			return true
-		})
-		if !found {
-			// Use addr.TargetRef.Name if available, else use IP as PodName
-			podName := ip
-			var podUID string
-			if addr.TargetRef != nil && addr.TargetRef.Name != "" {
-				podName = addr.TargetRef.Name
-				if pod, err := p.clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metav1.GetOptions{}); err == nil {
-					podUID = string(pod.UID)
+    // 1. Remove stale entries
+    p.cache.Range(func(key, value interface{}) bool {
+        pod := value.(PodStatus)
+        if pod.Function == function && pod.Namespace == namespace {
+            if _, ok := addrSet[pod.PodIP]; !ok {
+                p.cache.Delete(key)
+            }
+        }
+        return true
+    })
 
-					for _, container := range pod.Spec.Containers {
-						for _, env := range container.Env {
-							if env.Name == "max_inflight" {
-								if value, err := strconv.Atoi(env.Value); err == nil {
-									max_inflight = value
-									log.Printf("[REQ:%s] Found max_inflight for pod %s: %d", "not capturing", podName, max_inflight)
+    // 2. Add new endpoints as idle if not present AND check for pod restarts
+    for ip, addr := range addrSet {
+        found := false
+        p.cache.Range(func(key, value interface{}) bool {
+            pod := value.(PodStatus)
+            if pod.Function == function && pod.Namespace == namespace && pod.PodIP == ip {
+                found = true
+                // Check if pod restarted by comparing UIDs
+                if p.clientset != nil && addr.TargetRef != nil {
+                    currentPod, err := p.clientset.CoreV1().Pods(namespace).Get(context.TODO(), addr.TargetRef.Name, metav1.GetOptions{})
+                    if err == nil && string(currentPod.UID) != pod.PodUID {
+                        log.Printf("[REQ:%s] [UID-RESET] Pod %s UID changed: cached=%s, current=%s",
+                            "not capturing", pod.PodName, pod.PodUID, string(currentPod.UID))
+                        p.Set(pod.PodName, "reset", ip, function, namespace, pod.MaxInflight)
+                        p.setPodUID(pod.PodName, ip, string(currentPod.UID))
+                    } else if err != nil {
+                        log.Printf("[REQ:%s] [UID-ERROR] Failed to get current pod %s: %v",
+                            "not capturing", pod.PodName, err)
+                    } else {
+                        // reset pods that have been busy for too long
+                        if pod.Status == "busy" && time.Since(pod.Timestamp) > 2*time.Minute {
+                            log.Printf("[REQ:%s] [UID-RESET] Pod %s is busy for too long, resetting...", "INSIDE GetByFunction", pod.PodName)
+                            p.Set(pod.PodName, "reset", ip, function, namespace, pod.MaxInflight)
+                        }
+                    }
+                } else {
+                    log.Printf("[REQ:%s] [UID-INFO] No TargetRef for address %s, using cached UID %s",
+                        "not capturing", ip, pod.PodUID)
+                }
+                return false // stop searching
+            }
+            return true
+        })
+        if !found {
+            // Use addr.TargetRef.Name if available, else use IP as PodName
+            podName := ip
+            var podUID string
+            var max_inflight int
+            if addr.TargetRef != nil && addr.TargetRef.Name != "" {
+                podName = addr.TargetRef.Name
+                if pod, err := p.clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metav1.GetOptions{}); err == nil {
+                    // Only add pod if it's running
+                    if !isPodRunning(pod) {
+                        log.Printf("[PodStatusCache] Pod %s is not running (phase=%s), skipping", podName, pod.Status.Phase)
+                        continue
+                    }
+                    podUID = string(pod.UID)
+                    for _, container := range pod.Spec.Containers {
+                        for _, env := range container.Env {
+                            if env.Name == "max_inflight" {
+                                if value, err := strconv.Atoi(env.Value); err == nil {
+                                    max_inflight = value
+                                    log.Printf("[REQ:%s] Found max_inflight for pod %s: %d", "not capturing", podName, max_inflight)
+                                } else {
+                                    log.Printf("[REQ:%s] Error parsing max_inflight for pod %s: %v", "not capturing", podName, err)
+                                }
+                                break
+                            }
+                        }
+                        if max_inflight != 0 {
+                            break
+                        }
+                    }
+                } else {
+                    log.Printf("[PodStatusCache] Error getting pod %s: %v", podName, err)
+                    continue
+                }
+                p.Set(podName, "idle", ip, function, namespace, &max_inflight)
+                p.setPodUID(podName, ip, podUID)
+            }
+        }
+    }
 
-								} else {
-									log.Printf("[REQ:%s] Error parsing max_inflight for pod %s: %v", "not capturing", podName, err)
-								}
-								break // No need to check other containers
-							}
-						}
-						if max_inflight != 0 {
-							break // Exit the loop if we found max_inflight
-						}
+    // 3. Only return pods that are running and available
+    p.cache.Range(func(key, value interface{}) bool {
+        status := value.(PodStatus)
+        if status.Function == function && status.Namespace == namespace {
+            pod, err := p.clientset.CoreV1().Pods(namespace).Get(context.TODO(), status.PodName, metav1.GetOptions{})
+            if err == nil && isPodRunning(pod) {
+                result = append(result, status)
+            }
+        }
+        return true
+    })
 
-					}
-				}
-				p.Set(podName, "idle", ip, function, namespace, &max_inflight)
-				p.setPodUID(podName, ip, podUID) // Set the UID in the cache if available
-			}
-		}
-		p.cache.Range(func(key, value interface{}) bool {
-			status := value.(PodStatus)
-			if status.Function == function && status.Namespace == namespace && checkPodAvailable(status.PodIP) {
-				result = append(result, status)
-			}
-			return true
-		})
-	}
+    return result
+}
 
-	return result // This is a copy of the slice, not a reference for safe use
+// Helper function to check if a pod is running
+func isPodRunning(pod *corev1.Pod) bool {
+    return pod.Status.Phase == corev1.PodRunning
 }
 
 func checkPodAvailable(podIP string) bool {
@@ -362,85 +383,118 @@ func refreshAddresses(functionName, namespace string, clientset *kubernetes.Clie
 
 // Prune the cache by removing old entries and keeping only the most recent status for each pod
 func (c *PodStatusCache) PruneByAddresses(requestID, function, namespace string,
-	clientset *kubernetes.Clientset, addresses *[]corev1.EndpointAddress,
-	max_inflight int) {
-	lock := c.getFunctionLock(function, namespace)
-	lock.Lock()
-	defer lock.Unlock()
+    clientset *kubernetes.Clientset, addresses *[]corev1.EndpointAddress,
+    max_inflight int) {
+    lock := c.getFunctionLock(function, namespace)
+    lock.Lock()
+    defer lock.Unlock()
 
-	// 0. Refresh addresses from Kubernetes Endpoints
-	validAddresses := refreshAddresses(function, namespace, clientset)
-	if validAddresses == nil {
-		log.Printf("[REQ:%s] Failed to refresh addresses for function %s in namespace %s", requestID, function, namespace)
-	}
-	if addresses == nil || len(*addresses) == 0 {
-		// If no addresses are provided or the refresh failed, use the refreshed addresses
-		addresses = &validAddresses
-	}
-	addrSet := make(map[string]corev1.EndpointAddress, len(*addresses))
-	for _, addr := range *addresses {
-		addrSet[addr.IP] = addr
-	}
-	// 1. Remove stale entries
-	c.cache.Range(func(key, value interface{}) bool {
-		pod := value.(PodStatus)
-		if pod.Function == function && pod.Namespace == namespace {
-			if _, ok := addrSet[pod.PodIP]; !ok {
-				c.cache.Delete(key)
-			}
-		}
-		return true
-	})
-	// 2. Add new endpoints as idle if not present AND check for pod restarts
-	for ip, addr := range addrSet {
-		found := false
-		c.cache.Range(func(key, value interface{}) bool {
-			pod := value.(PodStatus)
-			if pod.Function == function && pod.Namespace == namespace && pod.PodIP == ip {
-				found = true
-
-				log.Printf("[REQ:%s] Checking pod UID for %s in namespace %s", requestID, pod.PodName, namespace)
-				// Check if pod restarted by comparing UIDs
-				if clientset != nil && addr.TargetRef != nil {
-					currentPod, err := clientset.CoreV1().Pods(namespace).Get(context.TODO(), addr.TargetRef.Name, metav1.GetOptions{})
-					if err == nil && string(currentPod.UID) != pod.PodUID {
-						log.Printf("[REQ:%s] [UID-RESET] Pod %s UID changed: cached=%s, current=%s",
-							requestID, pod.PodName, pod.PodUID, string(currentPod.UID))
-						c.Set(pod.PodName, "reset", ip, function, namespace, pod.MaxInflight)
-						c.setPodUID(pod.PodName, ip, string(currentPod.UID)) // Update the UID in the cache
-					} else if err != nil {
-						log.Printf("[REQ:%s] [UID-ERROR] Failed to get current pod %s: %v",
-							requestID, pod.PodName, err)
-					} else {
-						// reset pods that have been busy for too long
-						if pod.Status == "busy" && time.Since(pod.Timestamp) > 15*time.Minute {
-							log.Printf("[REQ:%s] [UID-RESET] Pod %s is busy for too long, resetting...", requestID, pod.PodName)
-							c.Set(pod.PodName, "reset", ip, function, namespace, pod.MaxInflight)
-						}
-					}
-				} else {
-					log.Printf("[REQ:%s] [UID-INFO] No TargetRef for address %s, using cached UID %s",
-						requestID, ip, pod.PodUID)
-				}
-
-				return false // stop searching
-			}
-			return true
-		})
-		if !found {
-			// Use addr.TargetRef.Name if available, else use IP as PodName
-			podName := ip
-			var podUID string
-			if addr.TargetRef != nil && addr.TargetRef.Name != "" {
-				podName = addr.TargetRef.Name
-				if pod, err := clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metav1.GetOptions{}); err == nil {
-					podUID = string(pod.UID)
-				}
-			}
-			c.Set(podName, "idle", ip, function, namespace, &max_inflight)
-			c.setPodUID(podName, ip, podUID) // Set the UID in the cache if available
-		}
-	}
+    // 0. Refresh addresses from Kubernetes Endpoints
+    validAddresses := refreshAddresses(function, namespace, clientset)
+    if validAddresses == nil {
+        log.Printf("[REQ:%s] Failed to refresh addresses for function %s in namespace %s", requestID, function, namespace)
+    }
+    if addresses == nil || len(*addresses) == 0 {
+        addresses = &validAddresses
+    }
+    addrSet := make(map[string]corev1.EndpointAddress, len(*addresses))
+    for _, addr := range *addresses {
+        addrSet[addr.IP] = addr
+    }
+    // 1. Remove stale entries and non-running pods
+    c.cache.Range(func(key, value interface{}) bool {
+        pod := value.(PodStatus)
+        if pod.Function == function && pod.Namespace == namespace {
+            // Remove if not in current addresses
+            if _, ok := addrSet[pod.PodIP]; !ok {
+                c.cache.Delete(key)
+                return true
+            }
+            // Remove if pod is not running
+            if pod.PodName != "" {
+                if k8spod, err := clientset.CoreV1().Pods(namespace).Get(context.TODO(), pod.PodName, metav1.GetOptions{}); err == nil {
+                    if k8spod.Status.Phase != corev1.PodRunning {
+                        log.Printf("[PodStatusCache] Removing non-running pod %s (phase=%s) from cache", pod.PodName, k8spod.Status.Phase)
+                        c.cache.Delete(key)
+                    }
+                }
+            }
+        }
+        return true
+    })
+    // 2. Add new endpoints as idle if not present AND check for pod restarts
+    for ip, addr := range addrSet {
+        found := false
+        c.cache.Range(func(key, value interface{}) bool {
+            pod := value.(PodStatus)
+            if pod.Function == function && pod.Namespace == namespace && pod.PodIP == ip {
+                found = true
+                log.Printf("[REQ:%s] Checking pod UID for %s in namespace %s", requestID, pod.PodName, namespace)
+                // Check if pod restarted by comparing UIDs
+                if clientset != nil && addr.TargetRef != nil {
+                    currentPod, err := clientset.CoreV1().Pods(namespace).Get(context.TODO(), addr.TargetRef.Name, metav1.GetOptions{})
+                    if err == nil && string(currentPod.UID) != pod.PodUID {
+                        log.Printf("[REQ:%s] [UID-RESET] Pod %s UID changed: cached=%s, current=%s",
+                            requestID, pod.PodName, pod.PodUID, string(currentPod.UID))
+                        c.Set(pod.PodName, "reset", ip, function, namespace, pod.MaxInflight)
+                        c.setPodUID(pod.PodName, ip, string(currentPod.UID))
+                    } else if err != nil {
+                        log.Printf("[REQ:%s] [UID-ERROR] Failed to get current pod %s: %v",
+                            requestID, pod.PodName, err)
+                    } else {
+                        // reset pods that have been busy for too long
+                        if pod.Status == "busy" && time.Since(pod.Timestamp) > 2*time.Minute {
+                            log.Printf("[REQ:%s] [UID-RESET] Pod %s is busy for too long, resetting...", requestID, pod.PodName)
+                            c.Set(pod.PodName, "reset", ip, function, namespace, pod.MaxInflight)
+                        }
+                    }
+                } else {
+                    log.Printf("[REQ:%s] [UID-INFO] No TargetRef for address %s, using cached UID %s",
+                        requestID, ip, pod.PodUID)
+                }
+                return false // stop searching
+            }
+            return true
+        })
+        if !found {
+            // Use addr.TargetRef.Name if available, else use IP as PodName
+            podName := ip
+            var podUID string
+            var inflight int
+            if addr.TargetRef != nil && addr.TargetRef.Name != "" {
+                podName = addr.TargetRef.Name
+                if pod, err := clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metav1.GetOptions{}); err == nil {
+                    // Only add pod if it's running
+                    if !isPodRunning(pod) {
+                        log.Printf("[PodStatusCache] Pod %s is not running (phase=%s), skipping", podName, pod.Status.Phase)
+                        continue
+                    }
+                    podUID = string(pod.UID)
+                    for _, container := range pod.Spec.Containers {
+                        for _, env := range container.Env {
+                            if env.Name == "max_inflight" {
+                                if value, err := strconv.Atoi(env.Value); err == nil {
+                                    inflight = value
+                                    log.Printf("[REQ:%s] Found max_inflight for pod %s: %d", requestID, podName, inflight)
+                                } else {
+                                    log.Printf("[REQ:%s] Error parsing max_inflight for pod %s: %v", requestID, podName, err)
+                                }
+                                break
+                            }
+                        }
+                        if inflight != 0 {
+                            break
+                        }
+                    }
+                } else {
+                    log.Printf("[PodStatusCache] Error getting pod %s: %v", podName, err)
+                    continue
+                }
+                c.Set(podName, "idle", ip, function, namespace, &inflight)
+                c.setPodUID(podName, ip, podUID)
+            }
+        }
+    }
 }
 
 func (p *PodStatusCache) setPodUID(podName, podIP, podUID string) {
