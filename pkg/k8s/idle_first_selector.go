@@ -236,12 +236,17 @@ func (s *IdleFirstSelector) Select(
 func (s *IdleFirstSelector) trySelectIdlePod(requestID string, addresses []corev1.EndpointAddress, functionName, namespace string, max_inflight int) (int, error) {
 	s.podStatusCache.PruneByAddresses(requestID, functionName, namespace, s.clientset, &addresses, max_inflight)
 	podStatuses := s.podStatusCache.GetByFunction(functionName, namespace)
-	idlePods := filterIdlePodsForAddresses(podStatuses, addresses, max_inflight)
+	idlePods := s.filterIdlePodsForAddresses(podStatuses, addresses, max_inflight)
 
 	tryCount := 0
 	for tryCount < 3 && len(idlePods) > 0 {
 		selected := idlePods[rand.Intn(len(idlePods))]
-		if s.checkPodAvailable(selected.PodIP) {
+		pod, err := s.clientset.CoreV1().Pods(namespace).Get(context.TODO(), selected.PodName, metav1.GetOptions{})
+		if err != nil {
+			log.Printf("Error getting pod %s: %v", selected.PodName, err)
+			continue
+		}
+		if isPodRunning(pod){
 			for i, addr := range addresses {
 				if addr.IP == selected.PodIP {
 					if s.podStatusCache.TryMarkPodBusy(selected.PodName, selected.PodIP) {
@@ -256,7 +261,7 @@ func (s *IdleFirstSelector) trySelectIdlePod(requestID string, addresses []corev
 						// Pod was marked busy by another request, refresh and try again
 						s.podStatusCache.PruneByAddresses(requestID, functionName, namespace, s.clientset, &addresses, max_inflight)
 						podStatuses = s.podStatusCache.GetByFunction(functionName, namespace)
-						idlePods = filterIdlePodsForAddresses(podStatuses, addresses, max_inflight)
+						idlePods = s.filterIdlePodsForAddresses(podStatuses, addresses, max_inflight)
 						continue
 					}
 				}
@@ -424,7 +429,7 @@ func (s *IdleFirstSelector) processQueue(requestID, key, functionName, namespace
 }
 
 // Helper to filter idle pods that are in the addresses list
-func filterIdlePodsForAddresses(pods []PodStatus, addresses []corev1.EndpointAddress, max_inflight int) []PodStatus {
+func (s *IdleFirstSelector) filterIdlePodsForAddresses(pods []PodStatus, addresses []corev1.EndpointAddress, max_inflight int) []PodStatus {
 	addrSet := make(map[string]struct{}, len(addresses))
 	for _, addr := range addresses {
 		addrSet[addr.IP] = struct{}{}
@@ -434,7 +439,12 @@ func filterIdlePodsForAddresses(pods []PodStatus, addresses []corev1.EndpointAdd
 		if pod.Status == "idle" && pod.ActiveConnections < max_inflight {
 			if _, ok := addrSet[pod.PodIP]; ok {
 				// Check if the pod is available
-				if checkPodAvailable(pod.PodIP) {
+				_pod, err := s.clientset.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.PodName, metav1.GetOptions{})
+				if err != nil {
+					log.Printf("Error getting pod %s: %v", pod.PodName, err)
+					continue
+				}
+				if isPodRunning(_pod) {
 					// Only add if the pod is available
 					idle = append(idle, pod)
 				} else {
