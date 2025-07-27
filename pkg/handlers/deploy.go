@@ -16,7 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
+	"time"
 	"github.com/openfaas/faas-netes/pkg/k8s"
 
 	types "github.com/openfaas/faas-provider/types"
@@ -35,6 +35,7 @@ func MakeDeployHandler(functionNamespace string, factory k8s.FunctionFactory, fu
 	secrets := k8s.NewSecretsClient(factory.Client)
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		requestStart := time.Now()  // ← Move timing inside the request handler
 
 		if r.Body != nil {
 			defer r.Body.Close()
@@ -108,7 +109,9 @@ func MakeDeployHandler(functionNamespace string, factory k8s.FunctionFactory, fu
 		}
 
 		log.Printf("Deployment created: %s.%s\n", request.Service, namespace)
+		log.Printf("[Saarthi-FaasNetes] Deployment creation took: %.4fs", time.Since(requestStart).Seconds())
 
+		serviceStart := time.Now()
 		service := factory.Client.CoreV1().Services(namespace)
 		serviceSpec, err := makeServiceSpec(request, factory)
 		if err != nil {
@@ -126,6 +129,7 @@ func MakeDeployHandler(functionNamespace string, factory k8s.FunctionFactory, fu
 		}
 
 		log.Printf("Service created: %s.%s\n", request.Service, namespace)
+		log.Printf("[Saarthi-FaasNetes] Service creation took: %.4fs", time.Since(serviceStart).Seconds())
 
 		w.WriteHeader(http.StatusAccepted)
 	}
