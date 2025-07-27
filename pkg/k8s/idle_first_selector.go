@@ -128,7 +128,7 @@ func (s *IdleFirstSelector) Select(
 	}
 
 	// 1. Sync cache with endpoints (removes stale, adds new as idle)
-	s.podStatusCache.PruneByAddresses(requestID, functionName, namespace, s.clientset, &addresses, max_inflight)
+	// s.podStatusCache.PruneByAddresses(requestID, functionName, namespace, s.clientset, &addresses, max_inflight)
 
 	// 2. Try to find an idle pod and use it
 	if index, err := s.trySelectIdlePod(requestID, addresses, functionName, namespace, max_inflight); err == nil {
@@ -234,7 +234,7 @@ func (s *IdleFirstSelector) Select(
 // SA - trySelectIdlePod attempts to select an idle pod from the provided addresses.
 // It returns the index of the selected pod or an error if no idle pods are available.
 func (s *IdleFirstSelector) trySelectIdlePod(requestID string, addresses []corev1.EndpointAddress, functionName, namespace string, max_inflight int) (int, error) {
-	s.podStatusCache.PruneByAddresses(requestID, functionName, namespace, s.clientset, &addresses, max_inflight)
+	// s.podStatusCache.PruneByAddresses(requestID, functionName, namespace, s.clientset, &addresses, max_inflight)
 	podStatuses := s.podStatusCache.GetByFunction(functionName, namespace)
 	idlePods := s.filterIdlePodsForAddresses(podStatuses, addresses, max_inflight)
 
@@ -244,6 +244,8 @@ func (s *IdleFirstSelector) trySelectIdlePod(requestID string, addresses []corev
 		pod, err := s.clientset.CoreV1().Pods(namespace).Get(context.TODO(), selected.PodName, metav1.GetOptions{})
 		if err != nil {
 			log.Printf("Error getting pod %s: %v", selected.PodName, err)
+			idlePods = removePodFromList(idlePods, selected.PodIP)
+			tryCount++
 			continue
 		}
 		if isPodRunning(pod){
@@ -259,7 +261,7 @@ func (s *IdleFirstSelector) trySelectIdlePod(requestID string, addresses []corev
 						return i, nil
 					} else {
 						// Pod was marked busy by another request, refresh and try again
-						s.podStatusCache.PruneByAddresses(requestID, functionName, namespace, s.clientset, &addresses, max_inflight)
+						// s.podStatusCache.PruneByAddresses(requestID, functionName, namespace, s.clientset, &addresses, max_inflight)
 						podStatuses = s.podStatusCache.GetByFunction(functionName, namespace)
 						idlePods = s.filterIdlePodsForAddresses(podStatuses, addresses, max_inflight)
 						continue
@@ -335,7 +337,8 @@ func (s *IdleFirstSelector) processQueue(requestID, key, functionName, namespace
 	queue := s.requestQueue[key]
 	s.queueMux.RUnlock()
 
-	ticker := time.NewTicker(10 * time.Millisecond) // Check every 10ms
+	ticker := time.NewTicker(100 * time.Millisecond) // Check every 100ms to avoid busy-waiting
+	// this is similar to the polling logic in the scale up function polling for new pods
 	defer ticker.Stop()
 
 	log.Printf("[REQ:%s] [Queue] Started queue processor for %s.%s", requestID, functionName, namespace)
@@ -365,7 +368,7 @@ func (s *IdleFirstSelector) processQueue(requestID, key, functionName, namespace
 			}
 
 			// Refresh pod status and try to select an idle pod
-			s.podStatusCache.PruneByAddresses(requestID, functionName, namespace, s.clientset, &queuedRequest.Addresses, max_inflight)
+			// s.podStatusCache.PruneByAddresses(requestID, functionName, namespace, s.clientset, &queuedRequest.Addresses, max_inflight)
 
 			if index, err := s.trySelectIdlePod(requestID, queuedRequest.Addresses, functionName, namespace, max_inflight); err == nil {
 				// SUCCESS: Found an idle pod
